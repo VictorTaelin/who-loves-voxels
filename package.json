@@ -1,0 +1,30 @@
+{
+  "name": "who-loves-voxels",
+  "version": "0.1.0",
+  "description": "Who doesn't?",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maiavictor/who-loves-voxels.git"
+  },
+  "keywords": [
+    "voxel",
+    "pixel",
+    "3d",
+    "webgl",
+    "rendering",
+    "shader",
+    "game",
+    "gaming",
+    "gamedev"
+  ],
+  "author": "Victor Maia",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/maiavictor/who-loves-voxels/issues"
+  },
+  "homepage": "https://github.com/maiavictor/who-loves-voxels#readme"
+}
