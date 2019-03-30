@@ -49,21 +49,21 @@ module.exports = (function who_loves_voxels() {
   function cam_tox(cam) {
     switch (cam.typ) {
       case PERSP_CAM: return vec_rotate([1, 0, 0], cam.rot);
-      case TIBIA_CAM: return cam.rot;
+      case TIBIA_CAM: return cam.dir;
     }
   }
 
   function cam_toy(cam) {
     switch (cam.typ) {
       case PERSP_CAM: return vec_rotate([0, 1, 0], cam.rot);
-      case TIBIA_CAM: return cam.rot;
+      case TIBIA_CAM: return cam.dir;
     }
   }
 
   function cam_toz(cam) {
     switch (cam.typ) {
       case PERSP_CAM: return vec_rotate([0, 0, 1], cam.rot);
-      case TIBIA_CAM: return cam.rot;
+      case TIBIA_CAM: return cam.dir;
     }
   }
 
@@ -104,15 +104,17 @@ module.exports = (function who_loves_voxels() {
   //   pos: the camera position
   //   dis: half of the screen width
   //   rot: direction of the camera (NOT its rotation)
-  function cam(typ, pos, dis, rot) {
+  function cam(typ, pos, dis, r_d) {
     if (typ === PERSP_CAM) {
-      dis = dis === undefined ? 2.0 : dis;
-      rot = rot === undefined ? quat_rot_z(0.0) : rot;
+      var dis = dis === undefined ? 2.0 : dis;
+      var dir = [-1/Math.sqrt(3), -1/Math.sqrt(3), -1];
+      var rot = r_d === undefined ? quat_rot_z(0.0) : r_d;
     } else {
-      dis = dis === undefined ? 256.0 : dis;
-      rot = rot === undefined ? [-1/Math.sqrt(3), 1/Math.sqrt(3), -1] : rot;
+      var dis = dis === undefined ? 256.0 : dis;
+      var dir = r_d === undefined ? [-1/Math.sqrt(3), -1/Math.sqrt(3), -1] : r_d;
+      var rot = quat_rot_z(0.0);
     }
-    return {typ, pos, dis, rot};
+    return {typ, pos, dis, rot, dir};
   }
 
   // ============== Creating a canvas ====================
@@ -186,8 +188,9 @@ module.exports = (function who_loves_voxels() {
       };
 
       struct March {
-        vec3 end_pos;
-        vec4 col_loss;
+        float run_dist;
+        vec3 hit_col;
+        vec3 abs_col;
       };
 
       float ray_box_intersect(vec3 ray_pos, vec3 ray_dir, vec3 box_pos, vec3 box_siz) {
@@ -289,61 +292,119 @@ module.exports = (function who_loves_voxels() {
         return Hit(dist, idx, Sprite(sprite_loc[idx], sprite_siz[idx], sprite_pos[idx]));
       }
 
-      March march(vec3 ray_pos, vec3 ray_dir, float distance) {
-        float ray_step = 0.5;
-        float steps = distance / ray_step;
+      March march(vec3 ray_pos, vec3 ray_dir, float max_dist) {
+        vec3 ini_pos    = ray_pos;
+        vec3 abs_col    = vec3(0.0);
+        vec3 hit_col    = vec3(0.0);
+        float ray_dist  = 0.0;
+        float step      = 0.5;
+        float max_steps = max_dist / step;
+
+        // Finds the first voxbox on its way
         Hit hit = next_hit(ray_pos, ray_dir);
         ray_pos = ray_pos + ray_dir * (hit.dist + eps);
-        float r = 1.0;
-        float g = 1.0;
-        float b = 1.0;
-        float a = 1.0;
-        for (float k = 0.0; k < steps; ++k) {
-          if (hit.idx == -1)
+        ray_dist = ray_dist + hit.dist + eps; 
+
+        // Performs the march
+        for (float k = 0.0; k < max_steps; ++k) {
+          
+          // If nothing more on its way, stop marching 
+          if (hit.idx == -1 || ray_dist >= max_dist) {
+            ray_dist = max_dist;
             break;
+          }
+
+          // If inside the focused voxbox, samples it
           if (inside(ray_pos, hit.spr.pos, hit.spr.siz)) {
-            ray_pos += ray_dir * ray_step;
+
+            // Increments ray position and distance
+            ray_pos += ray_dir * step;
+            ray_dist += step;
+
+            // Gets the voxel color
             vec4 vox = get_vox(hit.spr, ray_pos);
-            float sa = vox.w;
-            if (sa > 0.0) {
-              r -= (1.0 - vox.x) * sa * ray_step;
-              g -= (1.0 - vox.y) * sa * ray_step;
-              b -= (1.0 - vox.z) * sa * ray_step;
-              a -= sa * ray_step;
-            }
-            if (sa == 1.0) {
-              //vec3 sun_dir = normalize(vec3(cos(time), sin(time), 1.0));
-              //hit = next_hit(ray_pos + sun_dir * ray_step * 2.0, sun_dir);
-              //if (hit.idx != -1) {
-                //r *= 0.5;
-                //g *= 0.5;
-                //b *= 0.5;
-              //}
+
+            // If it is solid, stop the march
+            if (vox.w == 1.0) {
+              hit_col = vec3(vox) - abs_col;
+              abs_col = vec3(1.0, 1.0, 1.0);
               break;
             }
+
+            // If it has transparent color, increments the absorbed color 
+            if (vox.w > 0.0) {
+              abs_col += (vec3(1.0) - vec3(vox)) * vox.w * step;
+            }
+
+          // If outside the focused voxbox, find next voxbox on its way
           } else {
             hit = next_hit(ray_pos, ray_dir);
             ray_pos = ray_pos + ray_dir * (hit.dist + eps);
+            ray_dist = ray_dist + hit.dist + eps;
           }
         }
-        return March(ray_pos, vec4(1.0) - vec4(r, g, b, a));
+        return March(ray_dist, hit_col, abs_col);
       }
 
       void main(void) {
+        vec3 pix_col = vec3(1.0);
+        float max_dist = 1024.0;
+        March marched;
         vec3 ray_pos;
         vec3 ray_dir;
+        vec3 light_pos;
+        float light_dist;
+
+        // Sets initial ray position and direction
         if (cam_typ == ${PERSP_CAM}) {
           ray_pos = cam_pos;
           ray_dir = normalize(cam_tox * scr_pos.x + cam_toy * scr_pos.y + cam_toz * cam_dis);
         } else {
-          ray_pos = vec3(cam_pos.x + cam_dis * scr_pos.x, cam_pos.y + cam_dis * scr_pos.y, cam_pos.z) + vec3(0.5, 0.5, 0.5);
+          ray_pos = vec3(cam_pos.x + cam_dis * scr_pos.x, cam_pos.y - cam_dis * scr_pos.y, cam_pos.z) + vec3(0.5, 0.5, 0.5);
           ray_dir = normalize(cam_tox + cam_toy + cam_toz);
         }
 
-        March mar = march(ray_pos, ray_dir, 256.0);
-        vec4 col = vec4(1.0) - mar.col_loss;
+        // Marchs towards screen
+        marched = march(ray_pos, ray_dir, max_dist);
+        ray_pos = ray_pos + ray_dir * marched.run_dist;
+        pix_col = marched.hit_col * 0.5;
 
-        outColor = vec4(col.r, col.g, col.b, 1.0);
+        // Marchs towards lights
+        if (marched.run_dist < max_dist) {
+          float pi = 3.14;
+          float z = 128.0;
+          float r = 128.0;
+          float a = 0.15 + 0.15 * sin(time) / 2.0;
+
+          for (float d = 1.0; d < 2.0; ++d) {
+            light_pos = vec3(0.0 + cos(time * d) * r, 0.0 + sin(time * d) * r, z);
+            ray_dir = normalize(light_pos - ray_pos);
+            ray_pos = ray_pos + ray_dir * 2.5;
+            light_dist = distance(ray_pos, light_pos);
+            marched = march(ray_pos, ray_dir, light_dist);
+            pix_col = pix_col + (a - marched.abs_col * a);
+          }
+
+          float t12 = mod(time, 12.0);
+          if (t12 > 2.0 && t12 < 4.0) {
+            a = t12 < 3.0 ? 1.0 : 1.0 - (t12 - 3.0);
+            light_pos = vec3(128.0, 0.0, 64.0);
+            ray_dir = normalize(light_pos - ray_pos);
+            ray_pos = ray_pos + ray_dir * 2.5;
+            light_dist = distance(ray_pos, light_pos);
+            marched = march(ray_pos, ray_dir, light_dist);
+            pix_col = pix_col + (a - marched.abs_col * a);
+          }
+
+          //light_pos = vec3(ray_pos.x, ray_pos.y, 256.0);
+          //ray_dir = normalize(light_pos - ray_pos);
+          //ray_pos = ray_pos + ray_dir * 1.5;
+          //light_dist = distance(ray_pos, light_pos);
+          //marched = march(ray_pos, ray_dir, light_dist);
+          //pix_col = pix_col + (a - marched.abs_col * a) * 2.0;
+        }
+
+        outColor = vec4(pix_col, 1.0);
       }`;
       
     var fragShader = gl.createShader(gl.FRAGMENT_SHADER);
@@ -351,7 +412,7 @@ module.exports = (function who_loves_voxels() {
     gl.compileShader(fragShader);
 
     // TODO: improve
-    if (true) {
+    if (debug) {
       var compiled = gl.getShaderParameter(vertShader, gl.COMPILE_STATUS);
       console.log('Shader compiled successfully: ' + compiled);
       var compilationLog = gl.getShaderInfoLog(vertShader);
