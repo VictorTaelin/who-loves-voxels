@@ -164,6 +164,10 @@ module.exports = (function who_loves_voxels() {
       uniform vec3 sprite_pos[64];
       uniform vec3 sprite_siz[64];
 
+      uniform int   light_len;
+      uniform vec3  light_pos[32];
+      uniform float light_pow[32];
+
       uniform int cam_typ;
       uniform vec3 cam_pos;
       uniform vec3 cam_tox;
@@ -350,10 +354,11 @@ module.exports = (function who_loves_voxels() {
         vec3 pix_col = vec3(1.0);
         float max_dist = 1024.0;
         March marched;
+        vec3 hit_pos;
         vec3 ray_pos;
         vec3 ray_dir;
-        vec3 light_pos;
-        float light_dist;
+        vec3 lig_pos;
+        float lig_dist;
 
         // Sets initial ray position and direction
         if (cam_typ == ${PERSP_CAM}) {
@@ -366,42 +371,18 @@ module.exports = (function who_loves_voxels() {
 
         // Marchs towards screen
         marched = march(ray_pos, ray_dir, max_dist);
-        ray_pos = ray_pos + ray_dir * marched.run_dist;
+        hit_pos = ray_pos + ray_dir * (marched.run_dist - 0.5);
         pix_col = marched.hit_col * 0.5;
 
         // Marchs towards lights
         if (marched.run_dist < max_dist) {
-          float pi = 3.14;
-          float z = 128.0;
-          float r = 128.0;
-          float a = 0.15 + 0.15 * sin(time) / 2.0;
-
-          for (float d = 1.0; d < 2.0; ++d) {
-            light_pos = vec3(0.0 + cos(time * d) * r, 0.0 + sin(time * d) * r, z);
-            ray_dir = normalize(light_pos - ray_pos);
-            ray_pos = ray_pos + ray_dir * 2.5;
-            light_dist = distance(ray_pos, light_pos);
-            marched = march(ray_pos, ray_dir, light_dist);
-            pix_col = pix_col + (a - marched.abs_col * a);
+          for (int i = 0; i < max(light_len, 1); ++i) {
+            lig_pos = light_pos[i];
+            ray_dir = normalize(lig_pos - hit_pos);
+            ray_pos = hit_pos + ray_dir * 1.0;
+            marched = march(ray_pos, ray_dir, distance(lig_pos, ray_pos));
+            pix_col = pix_col + light_pow[i] * (vec3(1.0) - marched.abs_col) / pow(distance(hit_pos, lig_pos), 2.0);
           }
-
-          float t12 = mod(time, 12.0);
-          if (t12 > 2.0 && t12 < 4.0) {
-            a = t12 < 3.0 ? 1.0 : 1.0 - (t12 - 3.0);
-            light_pos = vec3(128.0, 0.0, 64.0);
-            ray_dir = normalize(light_pos - ray_pos);
-            ray_pos = ray_pos + ray_dir * 2.5;
-            light_dist = distance(ray_pos, light_pos);
-            marched = march(ray_pos, ray_dir, light_dist);
-            pix_col = pix_col + (a - marched.abs_col * a);
-          }
-
-          //light_pos = vec3(ray_pos.x, ray_pos.y, 256.0);
-          //ray_dir = normalize(light_pos - ray_pos);
-          //ray_pos = ray_pos + ray_dir * 1.5;
-          //light_dist = distance(ray_pos, light_pos);
-          //marched = march(ray_pos, ray_dir, light_dist);
-          //pix_col = pix_col + (a - marched.abs_col * a) * 2.0;
         }
 
         outColor = vec4(pix_col, 1.0);
@@ -458,7 +439,7 @@ module.exports = (function who_loves_voxels() {
     canvas.__who_loves_voxels = {gl, shader, indices, start};
   }
 
-  function render({canvas, camera, sprites, voxel_size = [256, 256, 256], debug}) {
+  function render({canvas, camera, sprites, lights, voxel_size = [256, 256, 256], debug}) {
     var cam = camera;
 
     if (!canvas.__who_loves_voxels) {
@@ -481,6 +462,14 @@ module.exports = (function who_loves_voxels() {
       sprite_siz.push(sprites[i].siz[0], sprites[i].siz[1], sprites[i].siz[2]);
     }
 
+    // Lights
+    var light_pos = [];
+    var light_pow = [];
+    for (var i = 0; i < lights.length; ++i) {
+      light_pos.push(lights[i].pos[0], lights[i].pos[1], lights[i].pos[2]);
+      light_pow.push(lights[i].pow);
+    }
+
     // Upload sprite data
     for (var i = 0; i < sprites.length; ++i) {
       if (sprites[i].data) {
@@ -492,6 +481,11 @@ module.exports = (function who_loves_voxels() {
     gl.uniform3fv(gl.getUniformLocation(shader, "sprite_loc"), sprite_loc);
     gl.uniform3fv(gl.getUniformLocation(shader, "sprite_pos"), sprite_pos);
     gl.uniform3fv(gl.getUniformLocation(shader, "sprite_siz"), sprite_siz);
+
+    // Upload light data
+    gl.uniform1i(gl.getUniformLocation(shader, "light_len"), lights.length);
+    gl.uniform3fv(gl.getUniformLocation(shader, "light_pos"), light_pos);
+    gl.uniform1fv(gl.getUniformLocation(shader, "light_pow"), light_pow);
 
     // Upload camera data
     gl.uniform1i(gl.getUniformLocation(shader, "cam_typ"), cam.typ);
