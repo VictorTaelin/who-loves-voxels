@@ -47,15 +47,24 @@ module.exports = (function who_loves_voxels() {
   }
 
   function cam_tox(cam) {
-    return vec_rotate([1, 0, 0], cam.rot);
+    switch (cam.typ) {
+      case PERSP_CAM: return vec_rotate([1, 0, 0], cam.rot);
+      case TIBIA_CAM: return cam.rot;
+    }
   }
 
   function cam_toy(cam) {
-    return vec_rotate([0, 1, 0], cam.rot);
+    switch (cam.typ) {
+      case PERSP_CAM: return vec_rotate([0, 1, 0], cam.rot);
+      case TIBIA_CAM: return cam.rot;
+    }
   }
 
   function cam_toz(cam) {
-    return vec_rotate([0, 0, 1], cam.rot);
+    switch (cam.typ) {
+      case PERSP_CAM: return vec_rotate([0, 0, 1], cam.rot);
+      case TIBIA_CAM: return cam.rot;
+    }
   }
 
   var quat_rot_x = angle => quat_from_axis_angle([1, 0, 0], angle);
@@ -83,13 +92,32 @@ module.exports = (function who_loves_voxels() {
     return {loc, siz, pos, vox, col, data};
   }
 
-  function cam(pos, dis = 2.0, rot = quat_rot_z(0.0)) {
-    return {pos, dis, rot};
+  const PERSP_CAM = 0;
+  const TIBIA_CAM = 1;
+
+  // typ: the type of the camera
+  // case PERSP_CAM:
+  //   pos: the camera position
+  //   dis: the distance to the screen
+  //   rot: quaternion representing a rotation
+  // case TIBIA_CAM:
+  //   pos: the camera position
+  //   dis: half of the screen width
+  //   rot: direction of the camera (NOT its rotation)
+  function cam(typ, pos, dis, rot) {
+    if (typ === PERSP_CAM) {
+      dis = dis === undefined ? 2.0 : dis;
+      rot = rot === undefined ? quat_rot_z(0.0) : rot;
+    } else {
+      dis = dis === undefined ? 256.0 : dis;
+      rot = rot === undefined ? [-1/Math.sqrt(3), 1/Math.sqrt(3), -1] : rot;
+    }
+    return {typ, pos, dis, rot};
   }
 
   // ============== Creating a canvas ====================
 
-  function install(canvas, voxel_siz, debug) {
+  function install({canvas, voxel_size, debug}) {
     gl = canvas.getContext('webgl2');
 
     var vertices = [-1,1,0,-1,-1,0,1,-1,0,-1,1,0,1,1,0,1,-1,0,];
@@ -126,7 +154,7 @@ module.exports = (function who_loves_voxels() {
       in vec3 scr_pos;
       out vec4 outColor;
 
-      uniform vec3 voxel_siz;
+      uniform vec3 voxel_size;
       uniform sampler3D voxel_data;
 
       uniform int  sprite_len;
@@ -134,6 +162,7 @@ module.exports = (function who_loves_voxels() {
       uniform vec3 sprite_pos[64];
       uniform vec3 sprite_siz[64];
 
+      uniform int cam_typ;
       uniform vec3 cam_pos;
       uniform vec3 cam_tox;
       uniform vec3 cam_toy;
@@ -154,6 +183,11 @@ module.exports = (function who_loves_voxels() {
         float dist;
         int idx;
         Sprite spr;
+      };
+
+      struct March {
+        vec3 end_pos;
+        vec4 col_loss;
       };
 
       float ray_box_intersect(vec3 ray_pos, vec3 ray_dir, vec3 box_pos, vec3 box_siz) {
@@ -223,14 +257,21 @@ module.exports = (function who_loves_voxels() {
         return p.y - y;
       }
 
+      bool inside(vec3 pos, vec3 box_pos, vec3 box_siz) {
+        vec3 d = box_siz * 0.5 - abs(pos - box_pos);
+        return d.x >= 0.0 && d.y >= 0.0 && d.z >= 0.0;
+      }
+
       vec4 get_vox(Sprite spr, vec3 pos) {
+        // If not a sprite, return a flat color
         if (spr.loc.x < 0.0) {
           return vec4(-spr.loc / 255.0, 1.0);
+        // Else, find its color on the voxel_data
         } else {
           vec3 d = spr.siz * 0.5 - abs(pos - spr.pos);
           if (d.x >= 0.0 && d.y >= 0.0 && d.z >= 0.0) {
             //return texture(voxel_data, vec3(0.5,0.5,0.5));
-            return texture(voxel_data, (spr.loc + vec3(0.5,0.5,0.5) * spr.siz + (pos - spr.pos)) / voxel_siz);
+            return texture(voxel_data, (spr.loc + vec3(0.5,0.5,0.5) * spr.siz + (pos - spr.pos)) / voxel_size);
           } else {
             return vec4(0.0);
           }
@@ -248,25 +289,16 @@ module.exports = (function who_loves_voxels() {
         return Hit(dist, idx, Sprite(sprite_loc[idx], sprite_siz[idx], sprite_pos[idx]));
       }
 
-      bool inside(vec3 pos, vec3 box_pos, vec3 box_siz) {
-        vec3 d = box_siz * 0.5 - abs(pos - box_pos);
-        return d.x >= 0.0 && d.y >= 0.0 && d.z >= 0.0;
-      }
-
-      void main(void) {
+      March march(vec3 ray_pos, vec3 ray_dir, float distance) {
         float ray_step = 0.5;
-        vec3 ray_pos = cam_pos;
-        vec3 ray_dir = normalize(cam_tox * scr_pos.x + cam_toy * scr_pos.y + cam_toz * cam_dis);
-
+        float steps = distance / ray_step;
         Hit hit = next_hit(ray_pos, ray_dir);
         ray_pos = ray_pos + ray_dir * (hit.dist + eps);
-
         float r = 1.0;
         float g = 1.0;
         float b = 1.0;
         float a = 1.0;
-
-        for (float k = 0.0; k < 512.0; ++k) {
+        for (float k = 0.0; k < steps; ++k) {
           if (hit.idx == -1)
             break;
           if (inside(ray_pos, hit.spr.pos, hit.spr.siz)) {
@@ -280,13 +312,13 @@ module.exports = (function who_loves_voxels() {
               a -= sa * ray_step;
             }
             if (sa == 1.0) {
-              vec3 sun_dir = normalize(vec3(cos(time), sin(time), 1.0));
-              hit = next_hit(ray_pos + sun_dir * ray_step * 2.0, sun_dir);
-              if (hit.idx != -1) {
-                r *= 0.5;
-                g *= 0.5;
-                b *= 0.5;
-              }
+              //vec3 sun_dir = normalize(vec3(cos(time), sin(time), 1.0));
+              //hit = next_hit(ray_pos + sun_dir * ray_step * 2.0, sun_dir);
+              //if (hit.idx != -1) {
+                //r *= 0.5;
+                //g *= 0.5;
+                //b *= 0.5;
+              //}
               break;
             }
           } else {
@@ -294,8 +326,24 @@ module.exports = (function who_loves_voxels() {
             ray_pos = ray_pos + ray_dir * (hit.dist + eps);
           }
         }
+        return March(ray_pos, vec4(1.0) - vec4(r, g, b, a));
+      }
 
-        outColor = vec4(r, g, b, 1.0);
+      void main(void) {
+        vec3 ray_pos;
+        vec3 ray_dir;
+        if (cam_typ == ${PERSP_CAM}) {
+          ray_pos = cam_pos;
+          ray_dir = normalize(cam_tox * scr_pos.x + cam_toy * scr_pos.y + cam_toz * cam_dis);
+        } else {
+          ray_pos = vec3(cam_pos.x + cam_dis * scr_pos.x, cam_pos.y + cam_dis * scr_pos.y, cam_pos.z) + vec3(0.5, 0.5, 0.5);
+          ray_dir = normalize(cam_tox + cam_toy + cam_toz);
+        }
+
+        March mar = march(ray_pos, ray_dir, 256.0);
+        vec4 col = vec4(1.0) - mar.col_loss;
+
+        outColor = vec4(col.r, col.g, col.b, 1.0);
       }`;
       
     var fragShader = gl.createShader(gl.FRAGMENT_SHADER);
@@ -325,14 +373,14 @@ module.exports = (function who_loves_voxels() {
     var texture = gl.createTexture();
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_3D, texture);
-    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA, voxel_siz[0], voxel_siz[1], voxel_siz[2], 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA, voxel_size[0], voxel_size[1], voxel_size[2], 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
     gl.uniform1i(gl.getUniformLocation(shader, "voxel_data"), texture);
-    gl.uniform3fv(gl.getUniformLocation(shader, "voxel_siz"), voxel_siz);
+    gl.uniform3fv(gl.getUniformLocation(shader, "voxel_size"), voxel_size);
 
     // ======= Associating shaders to buffer objects =======
 
@@ -349,9 +397,11 @@ module.exports = (function who_loves_voxels() {
     canvas.__who_loves_voxels = {gl, shader, indices, start};
   }
 
-  function render(canvas, cam, sprites, voxel_siz = [256, 256, 256], debug = false) {
+  function render({canvas, camera, sprites, voxel_size = [256, 256, 256], debug}) {
+    var cam = camera;
+
     if (!canvas.__who_loves_voxels) {
-      install(canvas, voxel_siz, debug);
+      install({canvas, voxel_size, debug});
     } 
 
     var {gl, shader, indices, start} = canvas.__who_loves_voxels;
@@ -383,6 +433,7 @@ module.exports = (function who_loves_voxels() {
     gl.uniform3fv(gl.getUniformLocation(shader, "sprite_siz"), sprite_siz);
 
     // Upload camera data
+    gl.uniform1i(gl.getUniformLocation(shader, "cam_typ"), cam.typ);
     gl.uniform3fv(gl.getUniformLocation(shader, "cam_pos"), cam.pos);
     gl.uniform3fv(gl.getUniformLocation(shader, "cam_tox"), cam_tox(cam));
     gl.uniform3fv(gl.getUniformLocation(shader, "cam_toy"), cam_toy(cam));
@@ -414,6 +465,8 @@ module.exports = (function who_loves_voxels() {
     cam_tox,
     cam_toy,
     cam_toz,
+    PERSP_CAM,
+    TIBIA_CAM,
     cam,
     sprite,
     render
