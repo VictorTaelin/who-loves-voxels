@@ -290,7 +290,7 @@ module.exports = (function who_loves_voxels() {
         float dist = inf;
         for (int i = 0; i < sprite_len; ++i) {
           float sprite_dist = ray_box_intersect(ray_pos, ray_dir, sprite_pos[i], sprite_siz[i]);
-          idx = dist > 0.0 && sprite_dist < dist ? i : idx;
+          idx = sprite_dist < dist ? i : idx;
           dist = min(sprite_dist, dist);
         }
         return Hit(dist, idx, Sprite(sprite_loc[idx], sprite_siz[idx], sprite_pos[idx]));
@@ -306,8 +306,10 @@ module.exports = (function who_loves_voxels() {
 
         // Finds the first voxbox on its way
         Hit hit = next_hit(ray_pos, ray_dir);
-        ray_pos = ray_pos + ray_dir * (hit.dist + eps);
-        ray_dist = ray_dist + hit.dist + eps; 
+        if (!inside(ray_pos, hit.spr.pos, hit.spr.siz)) {
+          ray_pos = ray_pos + ray_dir * (hit.dist + eps);
+          ray_dist = ray_dist + hit.dist + eps; 
+        }
 
         // Performs the march
         for (float k = 0.0; k < max_steps; ++k) {
@@ -371,15 +373,15 @@ module.exports = (function who_loves_voxels() {
 
         // Marchs towards screen
         marched = march(ray_pos, ray_dir, max_dist);
-        hit_pos = ray_pos + ray_dir * (marched.run_dist - 0.5);
-        pix_col = marched.hit_col * 0.5;
+        hit_pos = ray_pos + ray_dir * marched.run_dist;
+        pix_col = marched.hit_col * 0.1;
 
         // Marchs towards lights
         if (marched.run_dist < max_dist) {
           for (int i = 0; i < max(light_len, 1); ++i) {
             lig_pos = light_pos[i];
             ray_dir = normalize(lig_pos - hit_pos);
-            ray_pos = hit_pos + ray_dir * 1.0;
+            ray_pos = hit_pos + ray_dir * 1.5;
             marched = march(ray_pos, ray_dir, distance(lig_pos, ray_pos));
             pix_col = pix_col + light_pow[i] * (vec3(1.0) - marched.abs_col) / pow(distance(hit_pos, lig_pos), 2.0);
           }
