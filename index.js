@@ -71,27 +71,6 @@ module.exports = (function who_loves_voxels() {
   var quat_rot_y = angle => quat_from_axis_angle([0, 1, 0], angle);
   var quat_rot_z = angle => quat_from_axis_angle([0, 0, 1], angle);
 
-  function sprite({loc, siz, pos, col, vox}) {
-    if (typeof vox === "function") {
-      var data = new Uint8Array(siz[0] * siz[1] * siz[2] * 4);
-      for (var z = 0; z < siz[2]; ++z) {
-        for (var y = 0; y < siz[1]; ++y) {
-          for (var x = 0; x < siz[0]; ++x) {
-            var rgba = vox([x, y, z]);
-            var idx = (x + y * siz[0] + z * siz[0] * siz[1]) * 4;
-            data[idx + 0] = (rgba & 0xFF000000) >>> 24;
-            data[idx + 1] = (rgba & 0xFF0000) >>> 16;
-            data[idx + 2] = (rgba & 0xFF00) >>> 8;
-            data[idx + 3] = (rgba & 0xFF);
-          }
-        }
-      };
-    } else {
-      var data = null;
-    }
-    return {loc, siz, pos, vox, col, data};
-  }
-
   const PERSP_CAM = 0;
   const TIBIA_CAM = 1;
 
@@ -167,6 +146,9 @@ module.exports = (function who_loves_voxels() {
       uniform int   light_len;
       uniform vec3  light_pos[32];
       uniform float light_pow[32];
+
+      uniform vec3 sun_dir;
+      uniform float sun_pow;
 
       uniform int cam_typ;
       uniform vec3 cam_pos;
@@ -354,7 +336,8 @@ module.exports = (function who_loves_voxels() {
 
       void main(void) {
         vec3 pix_col = vec3(1.0);
-        float max_dist = 1024.0;
+        vec3 lig_col;
+        float max_dist = 256.0 * 256.0;
         March marched;
         vec3 hit_pos;
         vec3 ray_pos;
@@ -367,27 +350,44 @@ module.exports = (function who_loves_voxels() {
           ray_pos = cam_pos;
           ray_dir = normalize(cam_tox * scr_pos.x + cam_toy * scr_pos.y + cam_toz * cam_dis);
         } else {
-          ray_pos = vec3(cam_pos.x + cam_dis * scr_pos.x, cam_pos.y - cam_dis * scr_pos.y, cam_pos.z) + vec3(0.5, 0.5, 0.5);
+          // TODO: ray_pos will only adjust correctly for Tibia projection (sqrt3), must improve
+          //ray_pos = vec3(cam_pos.x + cam_dis * scr_pos.x + cam_pos.z / sqrt(3.0), cam_pos.y - cam_dis * scr_pos.y + cam_pos.z / sqrt(3.0), cam_pos.z) + vec3(0.5, 0.5, 0.5);
+          ray_pos = vec3(cam_pos.x + cam_dis * scr_pos.x, cam_pos.y - cam_dis * scr_pos.y + cam_pos.z / sqrt(3.0), cam_pos.z) + vec3(0.5, 0.5, 0.5);
           ray_dir = normalize(cam_tox + cam_toy + cam_toz);
         }
 
         // Marchs towards screen
         marched = march(ray_pos, ray_dir, max_dist);
         hit_pos = ray_pos + ray_dir * marched.run_dist;
-        pix_col = marched.hit_col * 0.1;
+        pix_col = marched.hit_col * 1.0;
 
         // Marchs towards lights
         if (marched.run_dist < max_dist) {
+          // Sun
+          ray_dir = normalize(sun_dir);
+          ray_pos = hit_pos + ray_dir * 1.5;
+          marched = march(ray_pos, ray_dir, 256.0 * 256.0);
+          lig_col = lig_col + sun_pow * (vec3(1.0) - marched.abs_col);
+
+          // Lights
           for (int i = 0; i < max(light_len, 1); ++i) {
             lig_pos = light_pos[i];
             ray_dir = normalize(lig_pos - hit_pos);
             ray_pos = hit_pos + ray_dir * 1.5;
+            ray_pos = ray_pos + vec3(0.0, 0.0, ray_pos.z < 1.0 ? 1.0 : 0.0);
             marched = march(ray_pos, ray_dir, distance(lig_pos, ray_pos));
-            pix_col = pix_col + light_pow[i] * (vec3(1.0) - marched.abs_col) / pow(distance(hit_pos, lig_pos), 2.0);
+            lig_col = lig_col + light_pow[i] * (vec3(1.0) - marched.abs_col) / pow(distance(hit_pos, lig_pos), 2.0);
           }
+          //pix_col = pix_col * 0.004 * lig_col + lig_col * 0.001 + vec3(0.05);
+          //pix_col = pix_col * 0.0 + pix_col * lig_col;
+          //pix_col = pix_col * 0.0 + pix_col * lig_col + lig_col * 0.5;
+          //pix_col = pix_col * 0.5 + pix_col * lig_col * 0.5 + lig_col * 0.0;
+          pix_col = pix_col * 0.5 + pix_col * lig_col;
+          outColor = vec4(pix_col, 1.0);
+        } else {
+          outColor = vec4(0.0);
+          //outColor = vec4(vec3(165.0, 202.0, 208.0) / 255.0 * (1.0 + 1.0 - (scr_pos.y + 1.0) * 0.5), 1.0);
         }
-
-        outColor = vec4(pix_col, 1.0);
       }`;
       
     var fragShader = gl.createShader(gl.FRAGMENT_SHADER);
@@ -441,14 +441,61 @@ module.exports = (function who_loves_voxels() {
     canvas.__who_loves_voxels = {gl, shader, indices, start};
   }
 
-  function render({canvas, camera, sprites, lights, voxel_size = [256, 256, 256], debug}) {
-    var cam = camera;
-
+  function render({canvas, draw, voxel_size = [256, 256, 256], debug}) {
     if (!canvas.__who_loves_voxels) {
       install({canvas, voxel_size, debug});
     } 
 
     var {gl, shader, indices, start} = canvas.__who_loves_voxels;
+
+    // Draw
+    var sprites = [];
+    var lights = [];
+    var sun = null;
+    var cam = null;
+    var voxel_buffer = new Uint32Array(64 * 64 * 64);
+    if (draw) {
+      draw({
+        sprite: function({loc, siz, pos, col, vox, gen, clr}) {
+          if (typeof vox === "function") {
+            var data = new Uint32Array(siz[0] * siz[1] * siz[2]);
+            for (var z = 0; z < siz[2]; ++z) {
+              for (var y = 0; y < siz[1]; ++y) {
+                for (var x = 0; x < siz[0]; ++x) {
+                  var rgba = vox([x, y, z]);
+                  var idx = x + y * siz[0] + z * siz[0] * siz[1];
+                  data[idx] = rgba;
+                }
+              }
+            };
+            var data = new Uint8Array(data.buffer);
+            gl.texSubImage3D(gl.TEXTURE_3D, 0, loc[0], loc[1], loc[2], siz[0], siz[1], siz[2], gl.RGBA, gl.UNSIGNED_BYTE, data);
+            //upload_voxels({loc, siz, data: new Uint8Array(data.buffer)});
+          }
+          if (gen) {
+            gen(voxel_buffer);
+            gl.texSubImage3D(gl.TEXTURE_3D, 0, loc[0], loc[1], loc[2], siz[0], siz[1], siz[2], gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(voxel_buffer.buffer));
+            if (clr) {
+              clr(voxel_buffer);
+            } else {
+              for (var i = 0; i < siz[0] * siz[1] * siz[2]; ++i) {
+                voxel_buffer[i] = 0x00000000;
+              }
+            }
+          }
+          sprites.push({loc, siz, pos, col});
+        },
+        light: function(new_light) {
+          lights.push(new_light);
+        },
+        sun: function(new_sun) {
+          sun = new_sun;
+        },
+        cam: function(new_cam) {
+          cam = new_cam;
+        }
+      });
+    };
 
     // Sprites
     var sprite_loc = [];
@@ -456,13 +503,23 @@ module.exports = (function who_loves_voxels() {
     var sprite_siz = [];
     for (var i = 0; i < sprites.length; ++i) {
       if (sprites[i].col !== undefined) {
-        sprite_loc.push(-((sprites[i].col & 0xFF000000) >>> 24), -((sprites[i].col & 0xFF0000) >>> 16), -((sprites[i].col & 0xFF00) >>> 8));
+        sprite_loc.push(-((sprites[i].col & 0xFF)), -((sprites[i].col & 0xFF00) >>> 8), -((sprites[i].col & 0xFF0000) >>> 16));
       } else {
         sprite_loc.push(sprites[i].loc[0], sprites[i].loc[1], sprites[i].loc[2]);
       }
       sprite_pos.push(sprites[i].pos[0], sprites[i].pos[1], sprites[i].pos[2]);
       sprite_siz.push(sprites[i].siz[0], sprites[i].siz[1], sprites[i].siz[2]);
     }
+    gl.uniform1i(gl.getUniformLocation(shader, "sprite_len"), sprites.length);
+    gl.uniform3fv(gl.getUniformLocation(shader, "sprite_loc"), sprite_loc);
+    gl.uniform3fv(gl.getUniformLocation(shader, "sprite_pos"), sprite_pos);
+    gl.uniform3fv(gl.getUniformLocation(shader, "sprite_siz"), sprite_siz);
+
+    // Sun
+    var sun_dir = sun ? sun.dir : [Math.sqrt(3), Math.sqrt(3), Math.sqrt(3)];
+    var sun_pow = sun ? sun.pow : 0.1;
+    gl.uniform3fv(gl.getUniformLocation(shader, "sun_dir"), sun_dir);
+    gl.uniform1f(gl.getUniformLocation(shader, "sun_pow"), sun_pow);
 
     // Lights
     var light_pos = [];
@@ -471,25 +528,11 @@ module.exports = (function who_loves_voxels() {
       light_pos.push(lights[i].pos[0], lights[i].pos[1], lights[i].pos[2]);
       light_pow.push(lights[i].pow);
     }
-
-    // Upload sprite data
-    for (var i = 0; i < sprites.length; ++i) {
-      if (sprites[i].data) {
-        gl.texSubImage3D(gl.TEXTURE_3D, 0, sprites[i].loc[0], sprites[i].loc[1], sprites[i].loc[2], sprites[i].siz[0], sprites[i].siz[1], sprites[i].siz[2], gl.RGBA, gl.UNSIGNED_BYTE, sprites[i].data);
-        sprites[i].data = null;
-      }
-    }
-    gl.uniform1i(gl.getUniformLocation(shader, "sprite_len"), sprites.length);
-    gl.uniform3fv(gl.getUniformLocation(shader, "sprite_loc"), sprite_loc);
-    gl.uniform3fv(gl.getUniformLocation(shader, "sprite_pos"), sprite_pos);
-    gl.uniform3fv(gl.getUniformLocation(shader, "sprite_siz"), sprite_siz);
-
-    // Upload light data
     gl.uniform1i(gl.getUniformLocation(shader, "light_len"), lights.length);
     gl.uniform3fv(gl.getUniformLocation(shader, "light_pos"), light_pos);
     gl.uniform1fv(gl.getUniformLocation(shader, "light_pow"), light_pow);
 
-    // Upload camera data
+    // Camera
     gl.uniform1i(gl.getUniformLocation(shader, "cam_typ"), cam.typ);
     gl.uniform3fv(gl.getUniformLocation(shader, "cam_pos"), cam.pos);
     gl.uniform3fv(gl.getUniformLocation(shader, "cam_tox"), cam_tox(cam));
@@ -498,7 +541,7 @@ module.exports = (function who_loves_voxels() {
     gl.uniform1f(gl.getUniformLocation(shader, "cam_dis"), cam.dis);
     gl.uniform1f(gl.getUniformLocation(shader, "time"), Date.now() / 1000 - start);
 
-    // Clear and render
+    // Render
     gl.clearColor(0.5, 0.5, 0.5, 1.0);
     gl.enable(gl.DEPTH_TEST);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -525,7 +568,6 @@ module.exports = (function who_loves_voxels() {
     PERSP_CAM,
     TIBIA_CAM,
     cam,
-    sprite,
     render
   };
 
